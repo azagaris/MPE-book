@@ -1,0 +1,266 @@
+---
+title: "Analysis of noisy data from deuteration experiments"
+author: "Antonios Zagaris, WBVR/WUR"
+date: "September 26, 2017"
+output:
+ pdf_document:
+  number_sections: true
+---
+
+```{r include=FALSE}
+# Initialization
+#  code.dir.1 <- '../CODE/1. Plot Digitization/' # tabulation code-containing folder path (relative to current folder)
+#  code.dir.2 <- '../CODE/2. Gaussian Mixed Model/' # GMM-analysis code-containing folder path (relative to current folder)
+#  # module.dir <- 'Modules' # name of folder containing subroutines
+#  # setwd(code.dir)
+ source('../CODE/Modules/settings.R') # load settings
+#  # lapply(paste(module.dir,list.files(module.dir),sep='/'),source)
+# # Load data
+#  prof.id <- '2457_03' # profile ID
+#  dim.plots <- read.csv(paste(code.dir.1,'Results/dims_df.csv',sep='') , stringsAsFactors = FALSE) # read df w/ plot dimensions
+#  if(any(names(dim.plots)!=c('bmp','Nx','Ny'))){stop('Check column names in dims_df.csv')}
+#  if(length(unique(dim.plots$Nx))>1)
+#  {stop('Not all plots have the same width; check dims_df.csv')}else
+#  {Nx <- unique(dim.plots$Nx)} # no. of pixels in x-direction
+#  if(length(unique(dim.plots$Ny))>1)
+#  {stop('Not all plots have the same height; check dims_df.csv')}
+#  {Ny <- unique(dim.plots$Ny)} # no. of pixels in y-direction
+#  dNy <- 16 # no. of additional pixels for lane 1 plot (ImageJ title padding)
+#  source(paste(code.dir.2,'end.user.inputs.R',sep=''))
+```
+
+# Summary
+
+## Data descriptives
+
+The original data set consists of a number of .csv files (_datasets_), each of which has precisely $4$ columns named (L--R)
+```{r echo=FALSE}
+ c('Counts-435','Counts-436','Counts-435','Counts-436')
+```
+\textsf{R} enforces unique column names---for good reason---and thus interprets these names as
+```{r echo=FALSE}
+ colnames(read.csv('../Data/2017.06.29_Lars/Blood/CD21/Blood_CD21_1.csv'))
+```
+The datasets are partitioned by _cell type_, with the represented types being
+```{r echo=FALSE}
+ list.dirs('Results',full.names=F,recursive=F)
+```
+Each (cell) type is assigned a dedicated subfolder in the folder `r 'Data/2017.06.29_Lars,'` and that subfolder holds the original datasets as communicated by Lars. Each such subfolder contains several datasets corresponding to _distinct animals_ but to _the same type_; the dataset--animal correspondence is reported in a file entitled `r 'Decode [...].xlsx'` housed in that same subfolder. Importantly, that same file also reports the correspondence between datasets and the times (in weeks) at which they were collected. The only other file in that subfolder, apart from datasets and the decoding file, is the file `r 'Time.xlsx'` whose significance is explained below.
+
+The numbers 435 and 436, in the column names, represent the _mass--to--charge--ratios_ (m/z) of undeuterated and deuterated deoxyribose moieties, respectively. Each of the $4$ columns of any given dataset reports integers (_counts_), and each column entry is the number of deoxyribose particles that (a) have the column-specific m/z and (b) were detected over a specific time interval. That time interval can be deduced from the aforementioned `r 'Time.xlsx'`, which consists of a single column that lists time instants $t_1,\ldots,t_N$. Specifically, the $n-$th entry of the $m-$th column, $c_{nm}$, lists the number of detected moieties in the interval $[t_{n-1},t_n]$ or $[t_n,t_{n+1}]$. Since the time grid is (mostly) uniform (see below for the occasional exception), the precise nature of the time interval is (largely) irrelevant.
+
+
+## Objective
+The scope of this report is to quantify the relation between _sample deuteration levels_ and _sample collection times_. According to the standard model, the relation is piecewise exponential with deuteration levels increasing toward saturation, at first, and decreasing past a certain time instant. Data fitting using this parametric model provides estimates for the salient model parameters, and thus for cellular _turnover rates._ In the datasets this report deals with, the collected samples have a prohibitingly low signal--to--noise (S/N) ratio, a fact that makes data fitting all but nonsensical. In view of that, this report first aims at developing a methodology that can reliably denoisify data and, subsequently, at applying said methodology to Lars's datasets.
+
+## Data preparation
+The data in question have undergone a first curation and the results were stored in the folder `r 'Results'`; all subsequent algorithms load and operate on the data specifically stored in that folder. For starters, all datasets were cropped past a certain cutoff time, so that they all list 2886 distinct time instants; this is done for reasons petaining to how \textsf{R} reads and processes .csv files. The cutoff time is well outside the range containing the signal of interest, hence this does not affect results in any way. Additionally, the files `r 'Decode [...].xlsx'` and `r 'Times.xlsx'` (in each subfolder) were exported to `r 'weeks.csv'` and `r 'times.csv'`, respectively (also in each subfolder). Moreover, the column `r 'File_name'` (in `r 'Decode [...].xlsx'`) was renamed to `r 'Filename'` (in `r 'weeks.csv'`) to comply with naming conventions within \textsf{R}. Note that the length of the column in `r 'times.csv'` does _not_ necessarily match that of the datasets (2886), as neither have listed time instants been cropped nor have missing times been added. The length difference is $\sim0.1\%$; since we are uninterested in the exact correspondence between times and counts, this was deemed negligible and no attempt to reconcile datasets and times was made.
+
+
+
+## Data quantification
+To denoisify and (subsequently) quantify the data, we follow the procedure outlined below. The algorithm operates separately on each _type_, and within that on each _dataset_; the information on _times_ and _weeks_ is retrieved, for each dataset, using the _type_ the dataset falls under.
+
+1. Set _rough_ lower/upper time limits `r 't.limsL/t.limsR'` that bound below/above the signal's retention times.
+
+2. Load the times `r 't.g'` for the currrent type, then append missing time instants to make `r 't.g'` a unifom grid  with step `r 'dt.g'` over the time interval `r '[t.limsL , t.limsR]'`.
+
+3. Extract (average, denoised) undeuterated ($\rm H_2O$) and deuterated ($\rm D_2O$) profiles for _start and end controls_. (Start/end controls open/close the _single_ GC/MS run in which _samples of the current type_ have been quantified.) This yields four _pure_ profiles: $\rm H_2O$--start, $\rm H_2O$--end, $\rm D_2O$--start and $\rm D_2O$--end.
+
+4. Identify the two peak locations and inter-peak "_valley_" location (where the inter-peak profile bottoms out) for the pure profiles.
+
+5. Identify upper/lower cutoff times (bounding $95\%$ of the profile AUC between them) for the pure profiles.
+
+6. Define _individual_, $\rm H_2O$ and $\rm D_2O$ cutoff times and "valley" locations _per dataset_.
+
+7. Prepare datasets by restricting to `r '[t.limsL , t.limsR]'` and interpolating missing values on the grid.
+
+8. Extract the contaminant (_pollutant_) $\rm D_2O$ profile by averaging and denoising _pure pollutant_ datasets.
+
+9. Repair $\rm D_2O$ profiles (except controls/pure pollutants) by estimating and removing pollutant component.
+
+10. Quantify $\rm D_2O/H_2O$ ratios using the repaired profiles.
+
+These steps are covered in detail below.
+
+
+
+# Detailed algorithm
+
+## Step 1: rough time limits [\textsf{settings.R}] {-}
+The objective of this step is to _contain_ the relevant part of each signal (i.e. dataset) in the _rough_ time interval `r '[t.limsL , t.limsR]'`. The rationale behind it is enabling us to automate the analysis, by excluding irrelevant peaks and valleys that would confuse the code. This is done _once_ and applies to _all datasets across all types_, so the lower/upper time limits `r 't.limsL/t.limsR'` should bound the relevant part of _all_ those signals. Under current settings, `r 't.limsL=5.00'` and `r 't.limsR=5.25'`.
+
+
+## Step 2: missing time points [\textsf{presets.R}] {-}
+The objective of this step is to "repair" the time instants (times) `r 't.g'` corresponding to the current type and reported in `r 'weeks.csv'`. Although the times in `r 't.g'` appear to form a grid with timestep `r 'dt.g=0.001'`, certain grid values (times) are conspicuously missing. Since times are reported down to $3$ decimal digits, this could be the combined effect of `r 'dt.g'` slightly exceeding `r '0.001'` and _round-off_. Such a mechanism would make "skipping" (quasi-)periodic, however this is not the case across cell types. For example, see below for the _differences_ (skip lengths) between _successive_ missing instants for a specific type:
+```{r echo=FALSE}
+ cell.typs <- list.files(paste('../Results/',sep='')) # available cell types [string vector]
+ cell.typ <- cell.typs[5] # select cell type [string]
+ data.fld <- paste('../Results/',cell.typ,'/CSV_data/',sep='') # path to data folder for selected cell type [string]
+ t.g <- read.csv(paste(data.fld,'times.csv',sep=''))[,1] # timepoints [num vector]
+ t.g.miss <- 1+which(diff(t.g , lag=1 , differences=2) > 1E3*.Machine$double.eps) # locations of missing time instants [nat vector]
+ # output
+  cell.typ # (print) selected cell type [string]
+  diff(t.g.miss) # (print) differences between locations of missing time instants [nat vector]
+```
+Instead, I consider "missing" times to be _actually missing_ and append them to `r 't.g'` at the appropriate places. This makes (the updated) `r 't.g'` a unifom grid with step `r 'dt.g'` over `r '[t.limsL , t.limsR]'`. This step is performed once per type, not per dataset.
+
+Appending (")missing(") times to the grid will, down the line, require a scheme to fill in profile values (counts) at these (formerly) missing points. This rekindles the discussion on the underlying mechanism, as the "repair" scheme depends on it. An alternative hypothesis is that the apparatus doubles, from `r '0.001'` to `r '0.002'` and every so often, the interval over which it _aggreates_ counts. Nevertheless, counts do not appear to double over such intervals, and this mechanism must be discredited as well. Fortunately, a mere $\sim 1.5\%$ of time points is missing for this data, so any reasonable scheme will do. Below, I fill in missing counts by interpolating linearly  from their nearest neighbors.
+
+
+## Step 3: pure profiles [\textsf{ctrl.prof.tab.R}] {-}
+The objective of this step is to construct uncontaminated (_pure_) $\rm H_2O$ and $\rm D_2O$ profiles for the current type. These will be used in two ways. First, to set the time window that contains the signal in the actual (non-control) datasets. And second, further down the pipeline I will assume each available $\rm D_2O$ dataset to be a weighted sum of a _pure_ profile and a _contaminant_ profile. Upon deducing the weights, I will be able to remove the (estimated) _contaminant_ contribution from the dataset, leaving behind _pure_ signal on which to base the computation of the $\rm H_2O/D_2O$ ratio. This necessitates _estimates_ of the _pure_ (here) and _contaminant_ (step 8) profiles for the current type.
+
+Pure profiles are constructed (per type) from the controls, with the complication that these are _several_ and come in _start/end_ varieties. The _start_ (_end_) control set is composed of multiple datasets, measured by the apparatus (in duplicate) at the _beginning_ (_end_) of the _single_ run quantifying _all samples of that cell type_. (If _start_ (_end_) controls are missing for some type, I copy them from that type's _end_ (_start_) controls.) Pure profiles are constructed by averaging and mollification according to the procedure below.
+
++ Restrict $\rm H_2O$--start controls to the interval `r '[t.limsL , t.limsR]'` by deleting entries corresponding to `r 't.g < t.limsL'` or `r 't.g > t.limsR'`.
+
++ If there were missing values in the _restricted_ `r 't.g'` (cf. step 2), estimate (in duplicate) the value of each control profile at those missing instants by linear interpolation from its neighbors.
+
++ Normalize these control profiles (independently and in duplicate) so that each has unit AUC.
+
++ Average these controls (including duplicates) to obtain an _average_ $\rm H_2O$--start profile.
+
++ Prepare a symmetric set of positive weights by discretizing a Gaussian kernel. The kernel's standard deviation `r 'sgm'` ($2$; in units of `r 'dt.g'`) and number of weights (`r '6*sgm+1'`) are set manually [\textsf{settings.R}]. (An optimal estimate of `r 'sgm'` on the basis of the variance between individual controls is overkill.)
+
++ _Mollify_ the average $\rm H_2O$--start profile using these weights, then renormalize to unit AUC. To avoid artifacts at the rough interval boundary, all control profiles must be effectively zero near it. 
+
++ Repeat the steps above for $\rm H_2O$--end, $\rm D_2O$--start and $\rm D_2O$--end profiles.
+
+This step is performed per type, not per dataset, and yields _unique_ start/end control profiles for _both_ $\rm H_2O$ and $\rm D_2O$ controls. These profiles are tabulated over the regular grid `r 't.limsL , t.limsL + dt.g , ... , t.limsR'`.
+
+
+## Step 4: pure profile peak/valley locations [\textsf{ctrl.lims.tab.R}] {-}
+The purpose of this step is to identify the locations of the two peaks and of the single valley between them, for each of the four pure profiles (constructed in step 3). This information will be used in the next steps, where I refine the estimate of the interval containing the signal.
+
++ Define [\textsf{settings.R}] a natural number `r 'N.w'`, then identify all times in `r 't.g'` that yield profile counts matching or exceeding those of their `r '2*N.w'`-many, left and right neighbors. For `r 'N.w=1'`, one would obtain all _local_ maxima; however, nearly all of these are induced by noise. The value `r 'N.w'`$\sim \log_4(\varepsilon/$`r 'N.t'`$)$, with `r 'N.t'` the number of entries in `r 't.g'`, ensures (under symmetric noise) that spurious maxima are absent with probability $1-\varepsilon$. For $\varepsilon=0.01$ and the settings here, `r 'N.w'` $\sim 10$.
+
++ Define [\textsf{settings.R}] a threshold `r 'peak.thr'`, then discard any remaining peaks lower than `r 'peak.thr*'`highest found peak. These are unlikely to be noise-induced and presumably belong to the pure profile, but discarding them in no way affects that profile. For the settings here, `r 'peak.thr'` $\sim 0.05$.
+
++ Find the valley as the location, between the two peaks, where the profile has a minimum.
+
+This step is also performed per type.
+
+## Step 5: refined intervals for pure profiles [\textsf{ctrl.lims.tab.R}] {-}
+The purpose of this step is to refine the signal-containing intervals for the four pure profiles (constructed in step 3). Using these lower/upper cutoff times, we will then define analogous intervals for (the rest of) the datasets in the next step. The operating principle is to define (per profile) an interval tighter than `r '[t.limsL , t.limsR]'` by sacrificing `r '100*peak.thr'`$\%$ of the total AUC (for the settings here, `r 5`$\%$). This entails that `r '100*peak.thr'`$\%$ of the profile AUC will have to be trimmed from the left and right profile tails.
+
++ Load the $\rm H_2O$--start pure profile (having unit AUC).
+
++ Distribute `r 'peak.thr'` of the AUC between left/right tails, proportionally to the AUC held by the left/right modes ("_humps_"). Since modes are not well-separated, estimate the ratio of AUCs held by the left/right modes by the ratio of AUCs below/above the left/right peaks.
+
++ Use this estimate to find upper/lower cutoffs. In technical terms, the lower (upper) cutoff is the maximum (minimum) entry of `r 't.g'` with the property that the profile AUC from `r 't.limsL'` to it (from  it to `r 't.limsR'`) does not exceed the AUC to--be--discarded allocated to the left (right) mode.
+
++ Repeat the steps above for $\rm H_2O$--end, $\rm D_2O$--start and $\rm D_2O$--end profiles.
+
+This step is also performed per type and yields upper/lower bounds for each of the four pure profiles.    
+
+## Step 6: refined intervals for individual profiles [\textsf{quant.prof.R}] {-}
+This step is similar to step 5 but concerns individual profiles. Defining tighter intervals for these is _absolutely necessary_, because the AUC of the $\rm D_2O$ profiles is affected by the substantial noise present over the interval `r '[t.limsL , t.limsR]'`. Tighter intervals cannot be "eyeballed" because of this very noise, so we base our estimates on the pure profile intervals (constructed in step 5).
+
++ Fix a dataset, then read from `r 'weeks.csv'` the order in which it was processed in the GC/MS run (say as $n$-th out of $N$ _non-control_ datasets).
+
++ Read the lower cutoff times `r 'tL.H2O.start/tL.H2O.end'` for the $\rm H_2O$--start/end pure profiles (of current type) constructed in step 5.
+
++ Partition the interval `r '[tL.H2O.start , tL.H2O.end]'` evenly in $N+1$ sub-intervals, `r 'tL.H2O.start , tL.H2O.1 , ... , tL.H2O.N , tL.H2O.end'`.
+
++ Assign `r 'tL.H2O.n'` as lower cutoff time for the current dataset. This assumes, for lack of a viable alternative, that cutoff times are "_sliding_" linearly with time as the GC/MS run progresses.
+
++ Repeat steps above for upper cutoffs (using _upper_ cutoff times `r 'tR.H2O.start/tR.H2O.end'`).
+
++ Repeat steps above for $\rm D_2O$ profiles (using the $\rm D_2O$ pure profile cutoff times).
+
+The efficacy of this '_linear interpolation_' scheme can be partly asessesed using the $\rm H_2O$ profiles, since tight intervals for these are easier to "eyeball" because of relatively low noise--to--signal ratios. The results are _not_ encouraging: e.g., the profile plots of `r 'Ileum_CD21'` below show that $\rm H_2O$ profiles do not "slide" (let alone linearly) from _start_ to _end_ pure profiles. For example, although `r 'Ileum_CD21_5'` should trace closely the start pure profile (derived using `r 'Ileum_CD21_'`$1-4$), it lies even further from it than the end pure profile does (derived using `r 'Ileum_CD21_'`$23-26$). (Although the left $\rm D_2O$ peak falls squarely on that of the start pure profile, that must be due to _elevated_ pollutant presence; note how the $\rm D_2O$ peak ratio is off the charts.) A possibly viable alternative for tight interval calibration may be to maximize the _cross correlation_ between the $H_2O$ profile (but not those of the---possibly pollutant-dominated---$\rm D_2O$ one) and a linear combination of the start/end pure profiles, i.e. to allow for an extra shift.
+
+![`r 'Ileum_CD21'` profiles (density over retention time; profiles normalized to unit AUC). The $\rm H_2O$/$\rm D_2O$ pure profiles are plotted in light blue/red; the rightmost/leftmost profiles correspond to (averaged, mollified) start/end controls. The $\rm H_2O$/$\rm D_2O$ profiles of `r 'Ileum_CD21_5'` are plotted in bright blue/red. The corresponding lower cutoff, valley and upper cutoff are plotted as vertical lines, also in bright blue/red.](bad_sliding.png)
+
+## Step 7: profile preparation [\textsf{quant.prof.R}] {-}
+This purpose of this step is to prepare datasets for quantification (i.e. for computing their deuteration levels). It yields $\rm H_2O$/$\rm D_2O$ datasets (in duplicate) that extend over a shorter, uniform time grid.
+
++ Select a dataset, then load its $\rm H_2O$ profiles (duplicate).
+
++ Trim the dataset using the corresponding $\rm H_2O$ lower/upper cutoffs (constructed in step 6).
+
++ Append, at the appropriate places, (any) time instants missing from the grid; estimate missing profile values (counts) by linear interpolation from their immediate neighbors.
+
++ Repeat steps above for the dataset's $\rm D_2O$ profiles.
+
+## Step 8: contaminant profile [\textsf{poll.prof.R}] {-}
+This purpose of this step is to construct a $\rm D_2O$ profile for the contaminant (_pollutant_) corresponding to the current cell type. (There is no evidence of contamination in $\rm H_2O$ profiles.) This and the _pure_ profiles act as inputs in step 9, where datasets are split (_decomposed_) into "_signal_" and "_pollutant_" components. The construction traces closely that for pure profiles (step 3), with the salient difference being that there are _no_ datasets designated as "pollutant controls" (i.e. _signal-free_ or _pure pollutant_ profiles). These must be _manually selected_, instead, as profiles that (presumably) hold much more pollutant than signal. To do that, I work with the _peak height ratio_, which remains _approximately constant across controls_ but _varies wildly across samples_. Specifically, I declare certain ($\rm D_2O$) datasets as "_pollutant-only_" if their peak ratio is _severely_ skewed (relative to that of the controls).  For example, the selected profiles for `r 'Ileum_CD21'` are the following.
+
+```{r echo=FALSE}
+ organ.c <- 'Ileum_CD21'
+ paste(organ.c,aux.l[[organ.c]],sep='_')
+```
+
+Once selected, these profiles are averaged, mollified and normalized over the _rough_ interval to yield an unequivocal _contaminant profile_ for the current type. This profile is invariably localized (primarily) in the left sub-interval (i.e. left of the valley), meaning that it corresponds to a _well-defined peak_; cf. plot below.
+
++ Declare and store in `r 'poll.num'` [\textsf{settings.R}] _pure pollutants_ datasets; selection is done by profile inspection.
+
++ Extract an average, mollified, _pure pollutant_ profile with unit AUC, by subjecting the stored pollutant profiles to the procedure detailed in step 3.
+
+This step is performed per type, not per dataset, and yields a _unique_ $\rm D_2O$ contaminant profile tabulated over a regular time grid covering the rough interval `r '[t.limsL , t.limsR]'`. The pollutant profile for `r 'Ileum_CD21'` is sketched below.
+
+![Estimated `r 'Ileum_CD21'` pollutant profile, nearly exclusively contained in the left sub-interval.](pollutant.png)
+
+
+## Step 9: profile purification [\textsf{quant.fix.R}] {-}
+This step is the algorithmic crux of my approach, in that it aims to _repair_ $\rm D_2O$ profiles by _removing_ from them the contaminant component. The central idea is to write each dataset in the form
+
+\begin{equation}
+\rm
+ f_{data}(t) = a \, f_{pure}(t) \ + \ (1-a) \, f_{poll}(t) ,
+\quad\mbox{for all $t$ in $t.g$}\, .
+\label{MM}
+\end{equation}
+
+Here, $\rm f_{data}$, $\rm f_{pure}$ and $\rm f_{poll}$ are the _profiles_ corresponding to the (current) _dataset_, _pure profile_ and _contaminant profile_, respectively. For definiteness, we assume all of them normalized to _unit AUC_. Further, $0 \le \rm a \le 1$ is a constant (_weight_) quantifying the _contribution_ of the _pure_ profile to the dataset; $\rm a=1$ corresponds to pure signal and $\rm a=0$ to pure contaminant. Such a decomposition is known as a _statistical mixture model_; if $\rm a$ can be _somehow_ estimated, then the operative quantity in our analysis can also be estimated via $\rm AUC_{purified data} = a \ AUC_{data}$.
+
+There are various ways to estimate $\rm a$ using the information we have. Seen as a literal equation for the _scalar_ $\rm a$, \eqref{MM} cannot be satisfied for any value of $\rm a$, because $\rm f_{data}$, $\rm f_{pure}$ and $\rm f_{poll}$ are linearly independent vectors. Decomposition \eqref{MM} is instead meant _statistically_, in that it involves _distributions_ which we only know imperfectly. Specifically, we only have _estimates_ $\rm \hat{f}_{data}$, $\rm \hat{f}_{pure}$ and $\rm \hat{f}_{poll}$; not the distributions themselves. An additional complication is the _approximate_ nature of \eqref{MM}, which derives from our simplistic modeling of how $\rm f_{pure}$ amd $\rm f_{poll}$ evolve during the GC/MS run (the former interpolates two profiles, the latter is constant) and therefore raises certain _optimality_ concerns (not addressed here).
+
+The normative way of estimating $\rm a$ is by posing it as a _hidden states_ problem and treating it numerically with the _EM algorithmic family_ \cite{EM-simple,EM-orig}, implemented in \textsf{R} as \textsf{mixtools} \cite{mixtools}. An "off the shelf" application of \textsf{mixtools} is presumably impossible here, since the pure/contaminant profiles are _tabulated_ (not known analyticallly). An expedient solution would be to apply \cite{mixtools} after "modeling" all distributions as Gaussians, but preliminary results in that direction are atrocious. Since the optimization problem is just $1$-D (only $\rm a$ need be optimized), a viable alternative would be to develop a "homebrew" (in its simplest form, an exhaustive search). This possibility is worth considering but, in the interst of time, I chose for a simpler option described below.
+
+ ( works invariably in one direction, elevating the left-over-right peak ratio; importantly, this implies that the pollutant primarily interacts with the left peak, i.e. is largely localized left of the "valley." )
+
+As discussed above, the pollutant profile is largely localized in the left sub-interval and thus affects the left peak more strongly than the right one. Importantly and by the same token, then, pollutant presence alters the _AUC proportion_ between _left and right sub-intervals_, hence we can use that proportion to backward engineer the amount of pollutant present in a dataset. To work out a formula, write $t.g.L$, $t.g.V$ and $t.g.R$ for the left cutoff, valley and right cutoff times of a given dataset, respectively. Letting $\rm AUC^{(L)}$ and $\rm AUC^{(R)}$ be the left and right AUCs of an arbitrary profile $\rm f$, we find
+
+\[
+\rm
+ AUC^{(L)} = \int_{t.g.L}^{t.g.V} f(t) \, dt \approx \left(\sum_{t = t.g.L}^{t.g.V} f(t)\right) \, dt.g
+\quad\mbox{and}\quad
+ AUC^{(R)} = \int_{t.g.V}^{t.g.R} f(t) \, dt  \approx \left(\sum_{t = t.g.V}^{t.g.R} f(t)\right) \, dt.g .
+\]
+
+Decomposition \eqref{MM} implies, then, the AUC decomposition
+
+\begin{equation}
+\rm
+ AUC_{data}^{(L)} = a \, AUC_{pure}^{(L)} \ + \ (1-a) \, AUC_{poll}^{(L)}
+\quad\mbox{and}\quad
+ AUC_{data}^{(R)} = a \, AUC_{pure}^{(R)} \ + \ (1-a) \, AUC_{poll}^{(R)} .
+\label{MM-AUC}
+\end{equation}
+
+(Note that the corresponding equation for the entire interval merely yields the identity $1=1$.) It is trivial to show that these two equations yield the same coefficient $\rm a$, using that $\rm AUC^{(L)} + AUC^{(R)} = 1$ for all three AUC types (data, pure and pollutant). This means that either of the left/right intervals can be used to compute that coefficient.
+
+## Step 10: profile quantification {-}
+Evident (coming up). Note that profiles tagged "pollutant-only" are excluded from the decomposition in step 9, meaning that they cannot be put on the deuteration curve.
+
+
+
+\begin{thebibliography}{99}
+
+\bibitem{mixtools}
+T Benaglia, D Chauveau, DR Hunter and DS Young (2009),
+mixtools: An R Package for Analyzing Finite Mixture Models,
+Journal of Statistical Software 32(6).
+
+\bibitem{EM-simple}
+M Blume (2002),
+Expectation maximization: A gentle introduction.
+
+\bibitem{EM-orig}
+AP Dempster, NM Laird and DB Rubin (1977),
+Maximum likelihood from incomplete data via the EM algorithm,
+J the Roy Stat Soc B 39(1):1--38.
+
+\end{thebibliography}
